@@ -114,7 +114,7 @@ _build_action_map()
 # Hand Detector (MediaPipe)
 # ---------------------------------------------------------------------------
 class HandDetector:
-    """Wraps MediaPipe Hands — extracts and normalises a 63-D landmark vector."""
+    """Wraps MediaPipe Hands — extracts and normalises a 63-D landmark vector + raw landmarks."""
 
     def __init__(self):
         self.mp_hands = mp.solutions.hands
@@ -127,7 +127,7 @@ class HandDetector:
         )
 
     def process(self, frame):
-        """Return (landmarks_63d | None, annotated_frame)."""
+        """Return (landmarks_63d | None, raw_landmarks | None, annotated_frame)."""
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb)
 
@@ -140,8 +140,9 @@ class HandDetector:
                 self.mp_draw.DrawingSpec(color=(0, 200, 150), thickness=2),
             )
             landmarks = self._normalise(hand)
-            return landmarks, frame
-        return None, frame
+            raw_landmarks = [[lm.x, lm.y, lm.z] for lm in hand.landmark]
+            return landmarks, raw_landmarks, frame
+        return None, None, frame
 
     @staticmethod
     def _normalise(hand):
@@ -155,6 +156,318 @@ class HandDetector:
 
     def close(self):
         self.hands.close()
+
+# ---------------------------------------------------------------------------
+# Cursor Controller (NEW)
+# ---------------------------------------------------------------------------
+class CursorController:
+    """Controls mouse cursor with finger tracking."""
+    
+    def __init__(self):
+        import pyautogui
+        self.pyautogui = pyautogui
+        self.screen_width, self.screen_height = pyautogui.size()
+        self.last_pos = None
+        self.smoothing = 0.5
+        self.dead_zone = 0.02
+        self.is_dragging = False
+        self.last_pinch_state = False
+        self.click_mode = False
+        self.target_pos = None
+        
+        # Configurable gesture mappings
+        self.gesture_config = {
+            'left_click': 'Thumb + Index pinch',
+            'right_click': 'Thumb + Middle pinch',
+            'drag': 'Closed fist',
+            'scroll': 'Two fingers up/down',
+            'click_select': 'Point + Pinch'
+        }
+        
+        # Custom trained gesture mappings (gesture_id -> cursor_action)
+        self.custom_gestures = {}
+        
+        # Configurable thresholds
+        self.pinch_threshold = 0.05
+        self.fist_threshold = 0.15
+        self.palm_threshold = 0.2
+        
+    def calculate_distance(self, p1, p2):
+        """Calculate Euclidean distance between two points."""
+        return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+    
+    def detect_pinch(self, landmarks, thumb_idx=4, finger_idx=8, threshold=0.05):
+        """Detect pinch gesture between thumb and specified finger."""
+        thumb_tip = landmarks[thumb_idx]
+        finger_tip = landmarks[finger_idx]
+        distance = self.calculate_distance(thumb_tip[:2], finger_tip[:2])
+        return distance < threshold
+    
+    def detect_fist(self, landmarks):
+        """Detect closed fist (all fingers curled)."""
+        # Check if fingertips are close to palm
+        palm = landmarks[0]
+        fingertips = [landmarks[i] for i in [4, 8, 12, 16, 20]]
+        distances = [self.calculate_distance(palm[:2], tip[:2]) for tip in fingertips]
+        return all(d < 0.15 for d in distances)
+    
+    def detect_open_palm(self, landmarks):
+        """Detect open palm (all fingers extended)."""
+        palm = landmarks[0]
+        fingertips = [landmarks[i] for i in [4, 8, 12, 16, 20]]
+        distances = [self.calculate_distance(palm[:2], tip[:2]) for tip in fingertips]
+        return all(d > 0.2 for d in distances)
+    
+    def count_extended_fingers(self, landmarks):
+        """Count number of extended fingers."""
+        # Simple heuristic: fingertip y < knuckle y
+        extended = 0
+        finger_tips = [8, 12, 16, 20]  # Index, middle, ring, pinky
+        finger_pips = [6, 10, 14, 18]  # PIP joints
+        
+        for tip, pip in zip(finger_tips, finger_pips):
+            if landmarks[tip][1] < landmarks[pip][1]:
+                extended += 1
+        
+        # Thumb (different logic)
+        if landmarks[4][0] < landmarks[3][0]:  # Thumb extended
+            extended += 1
+            
+        return extended
+    
+    def move_cursor(self, landmarks):
+        """Move cursor based on index finger tip position."""
+        # Use index finger tip (landmark 8)
+        finger_tip = landmarks[8]
+        
+        # Map to screen coordinates (flip Y axis)
+        target_x = int(finger_tip[0] * self.screen_width)
+        target_y = int(finger_tip[1] * self.screen_height)
+        
+        # Apply dead zone
+        if self.last_pos:
+            dx = abs(target_x - self.last_pos[0]) / self.screen_width
+            dy = abs(target_y - self.last_pos[1]) / self.screen_height
+            if dx < self.dead_zone and dy < self.dead_zone:
+                return
+        
+        # Smooth movement
+        if self.last_pos:
+            target_x = int(self.last_pos[0] * (1 - self.smoothing) + target_x * self.smoothing)
+            target_y = int(self.last_pos[1] * (1 - self.smoothing) + target_y * self.smoothing)
+        
+        # Move cursor
+        try:
+            self.pyautogui.moveTo(target_x, target_y, duration=0)
+            self.last_pos = (target_x, target_y)
+        except Exception as e:
+            log.debug(f"Cursor move error: {e}")
+    
+    def handle_clicks(self, landmarks):
+        """Handle click gestures based on configured mappings."""
+        # Detect various pinch gestures
+        thumb_index_pinch = self.detect_pinch(landmarks, 4, 8, self.pinch_threshold)
+        thumb_middle_pinch = self.detect_pinch(landmarks, 4, 12, self.pinch_threshold)
+        thumb_ring_pinch = self.detect_pinch(landmarks, 4, 16, self.pinch_threshold)
+        
+        # Detect fist
+        is_fist = self.detect_fist(landmarks)
+        
+        # Count extended fingers for point gesture
+        extended = self.count_extended_fingers(landmarks)
+        point_gesture = extended == 1  # Only index finger extended
+        
+        # Left click based on configuration
+        left_click_triggered = False
+        config = self.gesture_config.get('left_click', 'Thumb + Index pinch')
+        if config == 'Thumb + Index pinch':
+            left_click_triggered = thumb_index_pinch
+        elif config == 'Thumb + Middle pinch':
+            left_click_triggered = thumb_middle_pinch
+        elif config == 'Fist':
+            left_click_triggered = is_fist
+        elif config == 'Two finger pinch':
+            left_click_triggered = thumb_index_pinch
+        
+        # Right click based on configuration
+        right_click_triggered = False
+        config = self.gesture_config.get('right_click', 'Thumb + Middle pinch')
+        if config == 'Thumb + Middle pinch':
+            right_click_triggered = thumb_middle_pinch
+        elif config == 'Thumb + Ring pinch':
+            right_click_triggered = thumb_ring_pinch
+        elif config == 'Three finger pinch':
+            right_click_triggered = thumb_middle_pinch and thumb_ring_pinch
+        
+        # Click-to-select based on configuration
+        click_select_config = self.gesture_config.get('click_select', 'Point + Pinch')
+        if click_select_config != 'Disabled':
+            if point_gesture and not self.click_mode:
+                # Enter click mode - show target
+                self.click_mode = True
+                self.target_pos = self.last_pos
+                log.info("Click mode activated - point at target")
+            
+            elif point_gesture and self.click_mode:
+                # Determine confirmation gesture
+                confirm_triggered = False
+                if 'Pinch' in click_select_config:
+                    confirm_triggered = thumb_index_pinch
+                elif 'Fist' in click_select_config:
+                    confirm_triggered = is_fist
+                
+                if confirm_triggered and self.target_pos:
+                    try:
+                        self.pyautogui.click(self.target_pos[0], self.target_pos[1])
+                        log.info(f"Click-to-select at {self.target_pos}")
+                        self.click_mode = False
+                        self.target_pos = None
+                    except Exception as e:
+                        log.debug(f"Click-to-select error: {e}")
+        
+        # Execute left click
+        if left_click_triggered and not self.last_pinch_state and not self.click_mode:
+            try:
+                self.pyautogui.click()
+                log.info("Left click")
+            except Exception as e:
+                log.debug(f"Click error: {e}")
+        
+        # Execute right click
+        if right_click_triggered and not self.last_pinch_state:
+            try:
+                self.pyautogui.rightClick()
+                log.info("Right click")
+            except Exception as e:
+                log.debug(f"Right click error: {e}")
+        
+        self.last_pinch_state = left_click_triggered or right_click_triggered
+    
+    def handle_drag(self, landmarks):
+        """Handle drag and drop based on configured gesture."""
+        config = self.gesture_config.get('drag', 'Closed fist')
+        
+        drag_triggered = False
+        if config == 'Closed fist':
+            drag_triggered = self.detect_fist(landmarks)
+        elif config == 'Thumb + Index pinch hold':
+            drag_triggered = self.detect_pinch(landmarks, 4, 8, self.pinch_threshold)
+        elif config == 'All fingers pinch':
+            # Check if all fingertips are close together
+            palm = landmarks[0]
+            fingertips = [landmarks[i] for i in [4, 8, 12, 16, 20]]
+            distances = [self.calculate_distance(palm[:2], tip[:2]) for tip in fingertips]
+            drag_triggered = all(d < 0.12 for d in distances)
+        
+        if drag_triggered and not self.is_dragging:
+            # Start drag
+            try:
+                self.pyautogui.mouseDown()
+                self.is_dragging = True
+                log.info("Drag started")
+            except Exception as e:
+                log.debug(f"Drag start error: {e}")
+        
+        elif not drag_triggered and self.is_dragging:
+            # End drag
+            try:
+                self.pyautogui.mouseUp()
+                self.is_dragging = False
+                log.info("Drag ended")
+            except Exception as e:
+                log.debug(f"Drag end error: {e}")
+    
+    def handle_scroll(self, landmarks):
+        """Handle scroll based on configured gesture."""
+        config = self.gesture_config.get('scroll', 'Two fingers up/down')
+        extended = self.count_extended_fingers(landmarks)
+        
+        scroll_active = False
+        if config == 'Two fingers up/down':
+            scroll_active = extended == 2
+        elif config == 'Three fingers up/down':
+            scroll_active = extended == 3
+        elif config == 'Open palm move':
+            scroll_active = self.detect_open_palm(landmarks)
+        
+        if scroll_active:
+            # Get middle finger tip for scroll direction
+            middle_tip = landmarks[12]
+            
+            if self.last_pos:
+                # Vertical scroll based on Y movement
+                dy = middle_tip[1] - (self.last_pos[1] / self.screen_height)
+                
+                if abs(dy) > 0.01:
+                    scroll_amount = int(dy * 100)
+                    try:
+                        self.pyautogui.scroll(-scroll_amount)
+                    except Exception as e:
+                        log.debug(f"Scroll error: {e}")
+    
+    def update_settings(self, settings):
+        """Update cursor gesture configuration."""
+        if 'left_click' in settings:
+            self.gesture_config['left_click'] = settings['left_click']
+        if 'right_click' in settings:
+            self.gesture_config['right_click'] = settings['right_click']
+        if 'drag' in settings:
+            self.gesture_config['drag'] = settings['drag']
+        if 'scroll' in settings:
+            self.gesture_config['scroll'] = settings['scroll']
+        if 'click_select' in settings:
+            self.gesture_config['click_select'] = settings['click_select']
+        
+        log.info(f"Cursor settings updated: {self.gesture_config}")
+    
+    def set_custom_gesture(self, gesture_name, cursor_action):
+        """Map a custom trained gesture to a cursor action."""
+        self.custom_gestures[gesture_name] = cursor_action
+        log.info(f"Custom cursor gesture mapped: {gesture_name} -> {cursor_action}")
+    
+    def handle_custom_gesture(self, gesture_name):
+        """Execute cursor action for custom trained gesture."""
+        cursor_action = self.custom_gestures.get(gesture_name)
+        if not cursor_action:
+            return False
+        
+        # Execute the appropriate action
+        if cursor_action == 'left_click':
+            try:
+                self.pyautogui.click()
+                log.info("Custom gesture: Left click")
+                return True
+            except Exception as e:
+                log.debug(f"Custom left click error: {e}")
+        
+        elif cursor_action == 'right_click':
+            try:
+                self.pyautogui.rightClick()
+                log.info("Custom gesture: Right click")
+                return True
+            except Exception as e:
+                log.debug(f"Custom right click error: {e}")
+        
+        elif cursor_action == 'drag':
+            # Toggle drag state
+            if not self.is_dragging:
+                try:
+                    self.pyautogui.mouseDown()
+                    self.is_dragging = True
+                    log.info("Custom gesture: Drag started")
+                    return True
+                except Exception as e:
+                    log.debug(f"Custom drag start error: {e}")
+            else:
+                try:
+                    self.pyautogui.mouseUp()
+                    self.is_dragging = False
+                    log.info("Custom gesture: Drag ended")
+                    return True
+                except Exception as e:
+                    log.debug(f"Custom drag end error: {e}")
+        
+        return False
 
 # ---------------------------------------------------------------------------
 # Gesture Classifier (KNN)
@@ -383,6 +696,7 @@ class GestureService:
         self.classifier = GestureClassifier()
         self.recorder = SampleRecorder()
         self.executor = ActionExecutor()
+        self.cursor_controller = CursorController()  # NEW
         self.pool = ThreadPoolExecutor(max_workers=2)
 
         self.clients = set()
@@ -393,6 +707,7 @@ class GestureService:
         self.gestures = self._load_gestures()
         self.confidence_threshold = 0.55
         self.detection_overlay = True
+        self.cursor_mode = False
 
         log.info("GestureCtrl ML Service initialized")
 
@@ -432,12 +747,12 @@ class GestureService:
             return None
         frame = cv2.flip(frame, 1)
         frame = cv2.resize(frame, (640, 480))
-        landmarks, annotated = self.detector.process(frame)
+        landmarks, raw_landmarks, annotated = self.detector.process(frame)
         # Encode to JPEG here too (CPU work)
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
         _, buf = cv2.imencode(".jpg", annotated, encode_params)
         frame_b64 = base64.b64encode(buf).decode("utf-8")
-        return landmarks, frame_b64
+        return landmarks, raw_landmarks, frame_b64
 
     async def camera_loop(self):
         """Main frame capture + detection loop (non-blocking)."""
@@ -456,11 +771,11 @@ class GestureService:
                 await asyncio.sleep(0.01)
                 continue
 
-            landmarks, frame_b64 = result
+            landmarks, raw_landmarks, frame_b64 = result
             detection_info = None
 
             if landmarks is not None:
-                # Recording mode
+                # RECORDING MODE: Always takes priority over everything else
                 if self.recorder.active:
                     still_recording = self.recorder.save_sample(landmarks)
                     recording_msg = {
@@ -471,8 +786,43 @@ class GestureService:
                         "active": self.recorder.active,
                     }
                     await self.broadcast(recording_msg)
+                    
+                    # If recording just finished, check if it's a cursor gesture
+                    if not still_recording and self.gestures.get(self.recorder.gesture_id):
+                        gesture_data = self.gestures[self.recorder.gesture_id]
+                        if gesture_data.get("action") == "cursor_action" and gesture_data.get("cursorAction"):
+                            # Map the trained gesture to cursor action
+                            self.cursor_controller.set_custom_gesture(
+                                gesture_data.get("name"),
+                                gesture_data.get("cursorAction")
+                            )
+                
+                # CURSOR MODE: Control mouse with finger (only if not recording)
+                elif self.cursor_mode and raw_landmarks:
+                    try:
+                        self.cursor_controller.move_cursor(raw_landmarks)
+                        
+                        # Check for custom trained gestures first
+                        label, confidence = self.classifier.predict(
+                            landmarks, self.confidence_threshold
+                        )
+                        if label:
+                            # Check if this is a custom cursor gesture
+                            gesture_handled = self.cursor_controller.handle_custom_gesture(label)
+                            if not gesture_handled:
+                                # Fall back to built-in cursor gestures
+                                self.cursor_controller.handle_clicks(raw_landmarks)
+                                self.cursor_controller.handle_drag(raw_landmarks)
+                                self.cursor_controller.handle_scroll(raw_landmarks)
+                        else:
+                            # No custom gesture detected, use built-in gestures
+                            self.cursor_controller.handle_clicks(raw_landmarks)
+                            self.cursor_controller.handle_drag(raw_landmarks)
+                            self.cursor_controller.handle_scroll(raw_landmarks)
+                    except Exception as e:
+                        log.debug(f"Cursor control error: {e}")
 
-                # Prediction mode (only if not recording)
+                # GESTURE PREDICTION MODE (only if not recording and not in cursor mode)
                 else:
                     label, confidence = self.classifier.predict(
                         landmarks, self.confidence_threshold
@@ -536,7 +886,22 @@ class GestureService:
         elif cmd == "camera_stop":
             await self._close_camera()
 
+        elif cmd == "toggle_cursor_mode":
+            self.cursor_mode = data.get("enabled", not self.cursor_mode)
+            await self.broadcast({
+                "type": "cursor_mode_changed",
+                "enabled": self.cursor_mode,
+            })
+            log.info(f"Cursor mode: {'ON' if self.cursor_mode else 'OFF'}")
 
+        elif cmd == "update_cursor_settings":
+            settings = data.get("settings", {})
+            self.cursor_controller.update_settings(settings)
+            await self.broadcast({
+                "type": "cursor_settings_updated",
+                "settings": settings,
+            })
+            log.info("Cursor settings updated")
 
         elif cmd == "add_gesture":
             gid = data.get("id")
@@ -544,6 +909,15 @@ class GestureService:
             if gid:
                 self.gestures[gid] = gesture_data
                 self._save_gestures()
+                
+                # Check if this is a cursor gesture
+                if gesture_data.get("action") == "cursor_action":
+                    cursor_action = gesture_data.get("cursorAction")
+                    if cursor_action:
+                        self.cursor_controller.set_custom_gesture(
+                            gesture_data.get("name"), cursor_action
+                        )
+                
                 await self.broadcast({
                     "type": "gesture_updated",
                     "gestures": self.gestures,

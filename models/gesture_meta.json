@@ -46,5 +46,45 @@
     "active": true,
     "samples": 80,
     "createdAt": "2026-02-18T13:23:59.526Z"
+  },
+  "948fed15": {
+    "name": "g",
+    "icon": "\ud83e\udd18",
+    "action": "play_pause",
+    "active": true,
+    "samples": 80,
+    "createdAt": "2026-02-19T15:10:35.256Z"
+  },
+  "e1d8ab57": {
+    "name": "BISMILLAH",
+    "icon": "\ud83d\udd96",
+    "action": "screenshot",
+    "active": true,
+    "samples": 0,
+    "createdAt": "2026-02-19T17:16:21.048Z"
+  },
+  "04babaec": {
+    "name": "lets goo",
+    "icon": "\ud83e\udd18",
+    "action": "play_pause",
+    "active": true,
+    "samples": 0,
+    "createdAt": "2026-02-19T17:33:55.091Z"
+  },
+  "333ec972": {
+    "name": "Cursor Left Click",
+    "icon": "\ud83d\uddb1\ufe0f",
+    "action": "cursor_action",
+    "active": true,
+    "samples": 0,
+    "createdAt": "2026-02-19T19:43:02.308Z"
+  },
+  "4c97386a": {
+    "name": "sc",
+    "icon": "\u270a",
+    "action": "screenshot",
+    "active": true,
+    "samples": 0,
+    "createdAt": "2026-02-19T19:48:24.438Z"
   }
 }

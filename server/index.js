@@ -63,7 +63,7 @@ app.get("/api/gestures", (req, res) => {
 
 // POST /api/gestures — add a new gesture
 app.post("/api/gestures", (req, res) => {
-    const { name, icon, action } = req.body;
+    const { name, icon, action, cursorAction } = req.body;
     if (!name || !action) {
         return res.status(400).json({ error: "name and action are required" });
     }
@@ -76,6 +76,12 @@ app.post("/api/gestures", (req, res) => {
         samples: 0,
         createdAt: new Date().toISOString(),
     };
+    
+    // Add cursor action if this is a cursor gesture
+    if (cursorAction) {
+        gesture.cursorAction = cursorAction;
+    }
+    
     gestures[id] = gesture;
     saveGestures(gestures);
 
@@ -86,6 +92,32 @@ app.post("/api/gestures", (req, res) => {
     broadcastToClients({ type: "gesture_updated", gestures });
 
     res.status(201).json({ id, gesture });
+});
+
+// PATCH /api/gestures/:id — update a gesture
+app.patch("/api/gestures/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, icon, action, cursorAction } = req.body;
+    
+    if (!gestures[id]) {
+        return res.status(404).json({ error: "Gesture not found" });
+    }
+    
+    // Update gesture properties
+    if (name) gestures[id].name = name;
+    if (icon) gestures[id].icon = icon;
+    if (action) gestures[id].action = action;
+    if (cursorAction) gestures[id].cursorAction = cursorAction;
+    
+    saveGestures(gestures);
+
+    // Notify ML service
+    sendToML({ type: "update_gesture", id, data: gestures[id] });
+
+    // Broadcast to all browser clients
+    broadcastToClients({ type: "gesture_updated", gestures });
+
+    res.json({ id, gesture: gestures[id] });
 });
 
 // DELETE /api/gestures/:id — delete a gesture

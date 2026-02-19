@@ -1,8 +1,9 @@
 import React from 'react';
+import SystemStatusIndicator from './SystemStatusIndicator';
 
 export default function MonitorTab({
     liveFrame, detected, cameraOn, mlConnected,
-    startCamera, stopCamera, trainState, gestures, addToast
+    startCamera, stopCamera, trainState, gestures, addToast, systemState
 }) {
     const gestureCount = Object.keys(gestures).length;
     const activeGestures = Object.values(gestures).filter(g => g.active !== false).length;
@@ -34,6 +35,11 @@ export default function MonitorTab({
                 >
                     {cameraOn ? '⏹ Stop Camera' : '▶ Start Camera'}
                 </button>
+            </div>
+
+            {/* System Status */}
+            <div style={{ marginBottom: '20px' }}>
+                <SystemStatusIndicator systemState={systemState || 'PAUSED'} />
             </div>
 
             <div className="monitor-layout" style={{ marginTop: 20 }}>

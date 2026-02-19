@@ -32,10 +32,10 @@ const ACTIONS = [
     { value: 'none', label: 'No Action' },
 ];
 
-export default function AddGestureModal({ onAdd, onClose }) {
-    const [name, setName] = useState('');
-    const [icon, setIcon] = useState('✋');
-    const [action, setAction] = useState('play_pause');
+export default function AddGestureModal({ onAdd, onClose, editMode, existingGesture }) {
+    const [name, setName] = useState(editMode ? existingGesture?.name || '' : '');
+    const [icon, setIcon] = useState(editMode ? existingGesture?.icon || '✋' : '✋');
+    const [action, setAction] = useState(editMode ? existingGesture?.action || 'play_pause' : 'play_pause');
 
     const handleSubmit = () => {
         if (!name.trim()) return;
@@ -47,8 +47,10 @@ export default function AddGestureModal({ onAdd, onClose }) {
             <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
                     <div>
-                        <div className="modal-title">Add New Gesture</div>
-                        <div className="modal-desc">Define a hand gesture and map it to a desktop action.</div>
+                        <div className="modal-title">{editMode ? 'Edit Gesture' : 'Add New Gesture'}</div>
+                        <div className="modal-desc">
+                            {editMode ? 'Update the gesture name, icon, or action.' : 'Define a hand gesture and map it to a desktop action.'}
+                        </div>
                     </div>
                     <button className="modal-close" onClick={onClose} type="button" aria-label="Close">
                         ✕
@@ -107,7 +109,7 @@ export default function AddGestureModal({ onAdd, onClose }) {
                 <div className="modal-actions">
                     <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
                     <button className="btn btn-primary" onClick={handleSubmit} disabled={!name.trim()}>
-                        ✨ Add Gesture
+                        {editMode ? '💾 Update Gesture' : '✨ Add Gesture'}
                     </button>
                 </div>
             </div>

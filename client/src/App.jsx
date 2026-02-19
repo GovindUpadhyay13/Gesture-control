@@ -1,10 +1,15 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import LandingPage from './LandingPage';
 import { useBackend } from './hooks/useBackend';
 import GesturesTab from './components/GesturesTab';
 import MonitorTab from './components/MonitorTab';
 import SettingsTab from './components/SettingsTab';
 import Toast from './components/Toast';
+import ConflictModal from './components/ConflictModal';
+import FloatingWidget from './components/FloatingWidget';
+import TrainingOverlay from './components/TrainingOverlay';
+import SystemStatusIndicator from './components/SystemStatusIndicator';
+import CursorSettings from './components/CursorSettings';
 import { ACTIONS } from './components/AddGestureModal';
 import './App.css';
 
@@ -17,6 +22,12 @@ export default function App() {
 
     // Dark Mode State
     const [darkMode, setDarkMode] = useState(false);
+    
+    // System State Management (ACTIVE, PAUSED, TRAINING, CONFLICT)
+    const [systemState, setSystemState] = useState('PAUSED');
+    const [conflictData, setConflictData] = useState(null);
+    const [showFloatingWidget, setShowFloatingWidget] = useState(true);
+    const [showCursorSettings, setShowCursorSettings] = useState(false);
 
     // Apply dark mode class to body/root
     useEffect(() => {
@@ -29,9 +40,22 @@ export default function App() {
 
     const backend = useBackend();
     const {
-        gestures, detected, trainState, cameraOn,
-        startCamera, stopCamera, trainModel, mlConnected
+        gestures, detected, trainState, cameraOn, recording,
+        startCamera, stopCamera, trainModel, mlConnected, cursorMode, toggleCursorMode, updateCursorSettings
     } = backend;
+
+    // System state management based on camera and training status
+    useEffect(() => {
+        if (trainState?.status === 'training') {
+            setSystemState('TRAINING');
+        } else if (conflictData) {
+            setSystemState('CONFLICT');
+        } else if (cameraOn) {
+            setSystemState('ACTIVE');
+        } else {
+            setSystemState('PAUSED');
+        }
+    }, [cameraOn, trainState?.status, conflictData]);
 
     const addToast = useCallback((type, message, duration = 3500) => {
         const id = ++toastIdCounter;
@@ -42,12 +66,102 @@ export default function App() {
         setToasts((prev) => prev.filter((t) => t.id !== id));
     }, []);
 
+    const handleConflictResolve = useCallback((chosenGesture, remember) => {
+        // Execute the chosen gesture's action
+        if (chosenGesture.action && chosenGesture.action !== 'none') {
+            addToast('success', `Executing: ${chosenGesture.gesture}`);
+        }
+        
+        // If remember is true, store preference (could be implemented in backend)
+        if (remember) {
+            addToast('info', 'Preference saved for future conflicts');
+        }
+        
+        setConflictData(null);
+    }, [addToast]);
+
+    const handleTogglePause = useCallback(() => {
+        if (systemState === 'ACTIVE') {
+            stopCamera();
+            addToast('info', 'System paused');
+        } else if (systemState === 'PAUSED') {
+            startCamera();
+            addToast('success', 'System resumed');
+        }
+    }, [systemState, startCamera, stopCamera, addToast]);
+
+    const handleSaveCursorSettings = useCallback((settings) => {
+        // Send cursor settings to ML service
+        updateCursorSettings(settings);
+        addToast('success', 'Cursor settings saved and applied');
+    }, [updateCursorSettings, addToast]);
+
+    const handleTrainCursorGesture = useCallback((gestureId) => {
+        // Create a special cursor gesture ID
+        const cursorGestureId = `cursor_${gestureId}`;
+        
+        // Check if this cursor gesture already exists
+        const existingGesture = Object.entries(gestures || {}).find(
+            ([_, g]) => g.cursorAction === gestureId
+        );
+        
+        if (existingGesture) {
+            // Retrain existing cursor gesture
+            backend.startRecording(existingGesture[0], 500);
+            addToast('info', 'Retraining cursor gesture...');
+        } else {
+            // Create new cursor gesture
+            const gestureNames = {
+                'left_click': 'Cursor Left Click',
+                'right_click': 'Cursor Right Click',
+                'drag': 'Cursor Drag',
+                'scroll': 'Cursor Scroll',
+                'click_select': 'Cursor Click-Select'
+            };
+            
+            backend.addGesture(
+                gestureNames[gestureId] || `Cursor ${gestureId}`,
+                '🖱️',
+                'cursor_action',
+                gestureId  // Pass cursorAction
+            ).then(response => {
+                if (response && response.id) {
+                    // Start recording immediately
+                    backend.startRecording(response.id, 500);
+                    addToast('info', 'Starting cursor gesture training...');
+                }
+            }).catch(err => {
+                addToast('error', 'Failed to create cursor gesture');
+                console.error(err);
+            });
+        }
+    }, [backend, gestures, addToast]);
+
+    // Auto-retrain model when cursor gesture recording completes
+    const lastRecordingRef = useRef(null);
+    useEffect(() => {
+        // Check if recording just stopped
+        if (lastRecordingRef.current?.active && !recording?.active) {
+            const lastGestureId = lastRecordingRef.current.id;
+            const gesture = gestures?.[lastGestureId];
+            
+            // If it was a cursor gesture, auto-retrain the model
+            if (gesture?.action === 'cursor_action') {
+                addToast('info', 'Training complete! Retraining model...');
+                setTimeout(() => {
+                    trainModel();
+                }, 500);
+            }
+        }
+        lastRecordingRef.current = recording;
+    }, [recording, gestures, trainModel, addToast]);
+
     if (showLanding) {
         return <LandingPage onGetStarted={() => setShowLanding(false)} />;
     }
 
     // Dashboard Helper Data
-    const gestureCount = Object.keys(gestures).length;
+    const gestureCount = Object.keys(gestures || {}).length;
     const actionLabels = Object.fromEntries(ACTIONS.map(a => [a.value, a.label]));
     const formatTimeAgo = (ts) => {
         if (!ts) return '-';
@@ -75,8 +189,56 @@ export default function App() {
         }))
         : [{ name: 'No recent gestures', time: '-', icon: '—' }];
 
+    // Get current recording gesture info for training overlay
+    const recordingGesture = recording?.id && gestures ? gestures[recording.id] : null;
+
     return (
         <div className={`app-container ${darkMode ? 'dark' : ''}`}>
+            {/* Training Overlay - Full Screen */}
+            {recording?.active && recordingGesture && (
+                <TrainingOverlay
+                    liveFrame={backend.liveFrame}
+                    recording={recording}
+                    gestureName={recordingGesture.name}
+                    gestureIcon={recordingGesture.icon}
+                    onStop={() => backend.stopRecording(recording.id)}
+                />
+            )}
+
+            {/* Conflict Resolution Modal */}
+            {conflictData && (
+                <ConflictModal
+                    conflicts={conflictData}
+                    onResolve={handleConflictResolve}
+                    onClose={() => setConflictData(null)}
+                />
+            )}
+
+            {/* Cursor Settings Modal */}
+            {showCursorSettings && (
+                <CursorSettings
+                    onClose={() => setShowCursorSettings(false)}
+                    onTrain={handleTrainCursorGesture}
+                    recording={recording}
+                    liveFrame={backend.liveFrame}
+                    gestures={gestures}
+                />
+            )}
+
+            {/* Floating Utility Widget */}
+            {showFloatingWidget && !showLanding && (
+                <FloatingWidget
+                    systemState={systemState}
+                    onTogglePause={handleTogglePause}
+                    onOpenDashboard={() => setActiveTab('Home')}
+                    lastDetected={lastDetected}
+                    cameraOn={cameraOn}
+                    cursorMode={cursorMode}
+                    onToggleCursorMode={toggleCursorMode}
+                    onOpenCursorSettings={() => setShowCursorSettings(true)}
+                />
+            )}
+
             {/* Top Navigation Bar */}
             <nav className="navbar">
                 <div className="nav-left">
@@ -84,7 +246,7 @@ export default function App() {
                         <span>✋</span> gestureCtrl
                     </div>
                     <div className="nav-links">
-                        {['Home', 'Gestures', 'Monitor', 'Settings', 'Help'].map(tab => (
+                        {['Home', 'Gestures', 'Cursor Control', 'Monitor', 'Settings'].map(tab => (
                             <div
                                 key={tab}
                                 className={`nav-item ${activeTab === tab ? 'active' : ''}`}
@@ -110,6 +272,11 @@ export default function App() {
             <div className="main-wrapper">
                 {activeTab === 'Home' && (
                     <div className="dashboard-container">
+                        {/* System Status Banner */}
+                        <div style={{ gridColumn: '1 / -1', marginBottom: '16px' }}>
+                            <SystemStatusIndicator systemState={systemState} />
+                        </div>
+
                         {/* Left Column (Main Feed) */}
                         <div className="main-feed card-stack">
                             <div className="d-card card-model-status">
@@ -238,7 +405,7 @@ export default function App() {
                     </div>
                 )}
 
-                {/* Legacy Tabs Wrapped in New Layout Card */}
+                {}
                 {activeTab === 'Gestures' && (
                     <div className="d-card" style={{ minHeight: '600px' }}>
                         <GesturesTab
@@ -247,6 +414,7 @@ export default function App() {
                             recording={backend.recording}
                             trainState={backend.trainState}
                             addGesture={backend.addGesture}
+                            updateGesture={backend.updateGesture}
                             deleteGesture={backend.deleteGesture}
                             toggleGesture={backend.toggleGesture}
                             startRecording={backend.startRecording}
@@ -269,9 +437,51 @@ export default function App() {
                             trainState={backend.trainState}
                             gestures={backend.gestures}
                             addToast={addToast}
+                            systemState={systemState}
                         />
                     </div>
+                )}                {activeTab === 'Cursor Control' && (
+                    <div className="page-wrapper">
+                        <div className="d-card" style={{ padding: '40px' }}>
+                            <div style={{ marginBottom: '32px' }}>
+                                <h2 style={{ fontSize: '28px', fontWeight: '800', marginBottom: '8px' }}> Cursor Control</h2>
+                                <p style={{ color: 'var(--text-secondary)', fontSize: '15px', marginBottom: '16px' }}>
+                                    Train custom gestures to control your mouse cursor
+                                </p>
+                                <div style={{
+                                    background: 'rgba(0, 255, 178, 0.05)',
+                                    border: '1px solid rgba(0, 255, 178, 0.2)',
+                                    borderRadius: '12px',
+                                    padding: '16px 20px',
+                                    display: 'flex',
+                                    gap: '12px',
+                                    alignItems: 'flex-start'
+                                }}>
+                                    <span style={{ fontSize: '20px' }}></span>
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontWeight: '600', marginBottom: '4px', fontSize: '14px' }}>
+                                            Training Tip
+                                        </div>
+                                        <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+                                            Keep cursor mode OFF while training to avoid mouse interference. 
+                                            Enable it after training to use your gestures.
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <CursorSettings
+                                onClose={() => {}}
+                                onTrain={handleTrainCursorGesture}
+                                recording={recording}
+                                liveFrame={backend.liveFrame}
+                                gestures={gestures}
+                                embedded={true}
+                            />
+                        </div>
+                    </div>
                 )}
+
 
                 {activeTab === 'Settings' && (
                     <div className="page-wrapper">

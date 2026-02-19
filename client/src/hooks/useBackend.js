@@ -15,6 +15,7 @@ export function useBackend() {
     const [trainState, setTrainState] = useState({ status: 'idle', progress: 0, accuracy: 0 });
     const [stats, setStats] = useState(null);
     const [wsConnected, setWsConnected] = useState(false);
+    const [cursorMode, setCursorMode] = useState(false);
 
     const wsRef = useRef(null);
     const reconnectTimer = useRef(null);
@@ -104,6 +105,10 @@ export function useBackend() {
                         setStats(data);
                         break;
 
+                    case 'cursor_mode_changed':
+                        setCursorMode(data.enabled);
+                        break;
+
                     case 'error':
                         console.error('[WS] Error from server:', data.message);
                         break;
@@ -151,8 +156,11 @@ export function useBackend() {
         return res.json();
     }, []);
 
-    const addGesture = useCallback((name, icon, action) =>
-        api('POST', '/gestures', { name, icon, action }), [api]);
+    const addGesture = useCallback((name, icon, action, cursorAction) =>
+        api('POST', '/gestures', { name, icon, action, cursorAction }), [api]);
+
+    const updateGesture = useCallback((id, name, icon, action, cursorAction) =>
+        api('PATCH', `/gestures/${id}`, { name, icon, action, cursorAction }), [api]);
 
     const deleteGesture = useCallback((id) =>
         api('DELETE', `/gestures/${id}`), [api]);
@@ -178,6 +186,12 @@ export function useBackend() {
     const updateSettings = useCallback((settings) =>
         api('POST', '/settings', settings), [api]);
 
+    const toggleCursorMode = useCallback(() =>
+        send({ type: 'toggle_cursor_mode' }), [send]);
+
+    const updateCursorSettings = useCallback((settings) =>
+        send({ type: 'update_cursor_settings', settings }), [send]);
+
     return {
         // State
         gestures,
@@ -191,9 +205,11 @@ export function useBackend() {
         recording,
         trainState,
         stats,
+        cursorMode,
         // Actions
         send,
         addGesture,
+        updateGesture,
         deleteGesture,
         toggleGesture,
         startCamera,
@@ -202,5 +218,7 @@ export function useBackend() {
         stopRecording,
         trainModel,
         updateSettings,
+        toggleCursorMode,
+        updateCursorSettings,
     };
 }

@@ -4,10 +4,11 @@ import ConfirmDialog from './ConfirmDialog';
 
 export default function GesturesTab({
     gestures, detected, recording, trainState,
-    addGesture, deleteGesture, toggleGesture,
+    addGesture, deleteGesture, toggleGesture, updateGesture,
     startRecording, trainModel, addToast, liveFrame
 }) {
     const [showAdd, setShowAdd] = useState(false);
+    const [editingGesture, setEditingGesture] = useState(null);
     const [confirmDelete, setConfirmDelete] = useState(null);
 
     const gestureEntries = Object.entries(gestures);
@@ -15,12 +16,22 @@ export default function GesturesTab({
 
     const handleAdd = async (name, icon, action) => {
         try {
-            await addGesture(name, icon, action);
-            setShowAdd(false);
-            addToast('success', `Gesture "${name}" added successfully`);
+            if (editingGesture) {
+                await updateGesture(editingGesture.id, name, icon, action);
+                setEditingGesture(null);
+                addToast('success', `Gesture "${name}" updated successfully`);
+            } else {
+                await addGesture(name, icon, action);
+                setShowAdd(false);
+                addToast('success', `Gesture "${name}" added successfully`);
+            }
         } catch (e) {
-            addToast('error', 'Failed to add gesture');
+            addToast('error', editingGesture ? 'Failed to update gesture' : 'Failed to add gesture');
         }
+    };
+
+    const handleEdit = (id) => {
+        setEditingGesture({ id, ...gestures[id] });
     };
 
     const handleDelete = async (id) => {
@@ -43,7 +54,7 @@ export default function GesturesTab({
 
     const handleRecord = async (id) => {
         try {
-            await startRecording(id, 80);
+            await startRecording(id, 500);  // Increased from 80 to 500
             addToast('info', 'Recording started — hold your gesture steady');
         } catch (e) {
             addToast('error', 'Failed to start recording');
@@ -101,17 +112,6 @@ export default function GesturesTab({
                     <div className="progress-bar">
                         <div className="progress-fill" style={{ width: '100%' }} />
                     </div>
-                </div>
-            )}
-
-            {/* Live camera preview during recording */}
-            {recording?.active && liveFrame && (
-                <div className="recording-preview">
-                    <div className="recording-preview-header">
-                        <span className="recording-dot">⏺</span>
-                        <span>Live Preview — Hold your gesture in front of the camera</span>
-                    </div>
-                    <img className="recording-preview-feed" src={liveFrame} alt="Camera preview" />
                 </div>
             )}
 
@@ -177,6 +177,12 @@ export default function GesturesTab({
                                 <div className="gesture-card-actions">
                                     <button
                                         className="btn btn-sm btn-secondary"
+                                        onClick={() => handleEdit(id)}
+                                    >
+                                        ✏️ Edit
+                                    </button>
+                                    <button
+                                        className="btn btn-sm btn-secondary"
                                         onClick={() => handleRecord(id)}
                                         disabled={isRecording || (recording?.active && recording?.id !== id)}
                                     >
@@ -196,8 +202,16 @@ export default function GesturesTab({
             )}
 
             {/* Modals */}
-            {showAdd && (
-                <AddGestureModal onAdd={handleAdd} onClose={() => setShowAdd(false)} />
+            {(showAdd || editingGesture) && (
+                <AddGestureModal 
+                    onAdd={handleAdd} 
+                    onClose={() => {
+                        setShowAdd(false);
+                        setEditingGesture(null);
+                    }}
+                    editMode={!!editingGesture}
+                    existingGesture={editingGesture}
+                />
             )}
 
             {confirmDelete && gestures[confirmDelete] && (
